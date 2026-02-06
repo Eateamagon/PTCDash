@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --card: #ffffff;
+      --primary: #2c5282;
+      --primary-light: #ebf4ff;
+      --text: #2d3748;
+      --text-light: #718096;
+      --border: #e2e8f0;
+      --green: #38a169;
+      --green-bg: #c6f6d5;
+      --yellow: #d69e2e;
+      --yellow-bg: #fefcbf;
+      --red: #e53e3e;
+      --red-bg: #fed7d7;
+      --gray-bg: #edf2f7;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid var(--border);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .topbar {
+      background: var(--primary);
+      color: white;
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+
+    .topbar h1 { font-size: 1.2rem; }
+
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      font-size: 0.85rem;
+    }
+
+    .admin-badge {
+      display: inline-block;
+      background: var(--green-bg);
+      color: var(--green);
+      padding: 0.2rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .readonly-badge {
+      display: inline-block;
+      background: var(--yellow-bg);
+      color: var(--yellow);
+      padding: 0.2rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .toolbar {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 0.55rem 1rem;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+
+    .btn:hover { opacity: 0.9; transform: translateY(-1px); }
+    .btn:active { transform: translateY(0); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .btn-sync { background: var(--green); color: white; }
+
+    .toolbar-status {
+      font-size: 0.85rem;
+      color: var(--text-light);
+    }
+
+    .summary-bar {
+      display: flex;
+      gap: 1rem;
+      padding: 1rem 1.5rem;
+      overflow-x: auto;
+    }
+
+    .summary-card {
+      background: var(--card);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      min-width: 150px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+      cursor: pointer;
+      border: 2px solid transparent;
+      transition: border-color 0.15s;
+      user-select: none;
+    }
+
+    .summary-card:hover { border-color: var(--primary); }
+    .summary-card.active { border-color: var(--primary); background: var(--primary-light); }
+
+    .summary-card h3 {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      color: var(--text-light);
+      margin-bottom: 0.5rem;
+      letter-spacing: 0.5px;
+    }
+
+    .summary-card .count {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .summary-card .breakdown {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      font-size: 0.75rem;
+    }
+
+    .mini-stat {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .dot-green { background: var(--green); }
+    .dot-yellow { background: var(--yellow); }
+    .dot-red { background: var(--red); }
+    .dot-gray { background: #a0aec0; }
+
+    .table-container { padding: 0 1.5rem 2rem; }
+
+    .table-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .table-header h2 { font-size: 1.1rem; }
+
+    .legend {
+      display: flex;
+      gap: 1rem;
+      font-size: 0.8rem;
+      color: var(--text-light);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--card);
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+
+    thead { background: var(--primary); color: white; }
+
+    th {
+      padding: 0.7rem 0.75rem;
+      text-align: left;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+
+    td {
+      padding: 0.6rem 0.75rem;
+      font-size: 0.88rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    tr:last-child td { border-bottom: none; }
+
+    tr.status-in_building { background: var(--green-bg); }
+    tr.status-late { background: var(--yellow-bg); }
+    tr.status-cancel { background: var(--red-bg); }
+    tr.status-cancel td { text-decoration: line-through; color: var(--text-light); }
+    tr.status-cancel td:last-child { text-decoration: none; }
+
+    .status-btns { display: flex; gap: 4px; }
+
+    .btn-status {
+      padding: 0.3rem 0.55rem;
+      font-size: 0.72rem;
+      border-radius: 6px;
+      font-weight: 600;
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-status:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-ib { background: var(--green-bg); color: var(--green); border-color: var(--green); }
+    .btn-ib.active { background: var(--green); color: white; }
+
+    .btn-lt { background: var(--yellow-bg); color: var(--yellow); border-color: var(--yellow); }
+    .btn-lt.active { background: var(--yellow); color: white; }
+
+    .btn-cn { background: var(--red-bg); color: var(--red); border-color: var(--red); }
+    .btn-cn.active { background: var(--red); color: white; }
+
+    .status-label {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .status-label.sl-in_building { background: var(--green-bg); color: var(--green); }
+    .status-label.sl-late { background: var(--yellow-bg); color: var(--yellow); }
+    .status-label.sl-cancel { background: var(--red-bg); color: var(--red); }
+    .status-label.sl-none { background: var(--gray-bg); color: var(--text-light); }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem;
+      color: var(--text-light);
+    }
+
+    .empty-state h3 { margin-bottom: 0.5rem; }
+
+    @media (max-width: 768px) {
+      .summary-bar { flex-wrap: wrap; }
+      .summary-card { min-width: 120px; flex: 1; }
+      table { font-size: 0.8rem; }
+      th, td { padding: 0.5rem; }
+      .status-btns { flex-direction: column; }
+      .topbar { flex-direction: column; gap: 0.5rem; text-align: center; }
+      .toolbar { justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="loading">
+  <div class="spinner"></div>
+  <div style="color:var(--text-light)">Loading dashboard...</div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard" style="display:none">
+  <div class="topbar">
+    <h1>PTC Sign-Up Dashboard</h1>
+    <div class="topbar-right">
+      <span id="user-info"></span>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <button class="btn btn-sync" id="btn-refresh" onclick="doRefresh()">Refresh Data</button>
+    <span class="toolbar-status" id="toolbar-status"></span>
+  </div>
+
+  <div class="summary-bar" id="summary-bar"></div>
+
+  <div class="table-container">
+    <div class="table-header">
+      <h2 id="table-title">All Grades</h2>
+      <div class="legend">
+        <span class="legend-item"><span class="dot dot-green"></span> In Building</span>
+        <span class="legend-item"><span class="dot dot-yellow"></span> Late</span>
+        <span class="legend-item"><span class="dot dot-red"></span> Cancelled</span>
+        <span class="legend-item"><span class="dot dot-gray"></span> Pending</span>
+      </div>
+    </div>
+    <div id="table-area"></div>
+  </div>
+</div>
+
+<script>
+  var currentUser = null;
+  var currentGrade = null;
+
+  // ── Init ─────────────────────────────────────────────────────
+
+  google.script.run
+    .withSuccessHandler(function(user) {
+      currentUser = user;
+      initDashboard();
+    })
+    .withFailureHandler(function(err) {
+      document.getElementById('loading').innerHTML =
+        '<div style="color:#e53e3e;text-align:center;padding:2rem"><h3>Unable to load</h3><p>' + err.message + '</p></div>';
+    })
+    .getCurrentUser();
+
+  function initDashboard() {
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+
+    var badge = currentUser.role === 'admin'
+      ? '<span class="admin-badge">ADMIN</span>'
+      : '<span class="readonly-badge">READ ONLY</span>';
+    document.getElementById('user-info').innerHTML = currentUser.email + ' ' + badge;
+
+    loadData();
+  }
+
+  // ── Data Loading ─────────────────────────────────────────────
+
+  function showMsg(msg) {
+    document.getElementById('toolbar-status').textContent = msg;
+  }
+
+  function loadData() {
+    showMsg('Loading...');
+    google.script.run
+      .withSuccessHandler(function(result) {
+        renderSummary(result.summary);
+        renderTable(result.signups);
+        showMsg('Last refreshed: ' + new Date().toLocaleTimeString());
+      })
+      .withFailureHandler(function(err) {
+        showMsg('Error: ' + err.message);
+      })
+      .getSignups(currentGrade);
+  }
+
+  function doRefresh() {
+    var btn = document.getElementById('btn-refresh');
+    btn.disabled = true;
+    showMsg('Refreshing...');
+
+    google.script.run
+      .withSuccessHandler(function(result) {
+        renderSummary(result.summary);
+        renderTable(result.signups);
+        showMsg('Refreshed: ' + new Date().toLocaleTimeString());
+        btn.disabled = false;
+      })
+      .withFailureHandler(function(err) {
+        showMsg('Error: ' + err.message);
+        btn.disabled = false;
+      })
+      .refreshData(currentGrade);
+  }
+
+  function filterGrade(grade) {
+    currentGrade = grade;
+    loadData();
+  }
+
+  // ── Render Summary ───────────────────────────────────────────
+
+  function renderSummary(summary) {
+    var bar = document.getElementById('summary-bar');
+    var html = '';
+    var t = summary.totals;
+    html += summaryCardHtml('All Grades', null, t.total, t.in_building, t.late, t.cancelled, t.pending);
+
+    for (var i = 0; i < summary.grades.length; i++) {
+      var g = summary.grades[i];
+      html += summaryCardHtml(g.grade, g.grade, g.total, g.in_building, g.late, g.cancelled, g.pending);
+    }
+
+    bar.innerHTML = html;
+  }
+
+  function summaryCardHtml(label, grade, total, inB, late, cancel, pending) {
+    var active = (grade === currentGrade) || (grade === null && currentGrade === null) ? ' active' : '';
+    var onclick = grade === null ? 'filterGrade(null)' : "filterGrade('" + esc(grade) + "')";
+    return '<div class="summary-card' + active + '" onclick="' + onclick + '">' +
+      '<h3>' + esc(label) + '</h3>' +
+      '<div class="count">' + total + '</div>' +
+      '<div class="breakdown">' +
+        '<span class="mini-stat"><span class="dot dot-green"></span>' + inB + '</span>' +
+        '<span class="mini-stat"><span class="dot dot-yellow"></span>' + late + '</span>' +
+        '<span class="mini-stat"><span class="dot dot-red"></span>' + cancel + '</span>' +
+        '<span class="mini-stat"><span class="dot dot-gray"></span>' + pending + '</span>' +
+      '</div></div>';
+  }
+
+  // ── Render Table ─────────────────────────────────────────────
+
+  function renderTable(signups) {
+    document.getElementById('table-title').textContent = currentGrade || 'All Grades';
+
+    if (!signups || signups.length === 0) {
+      document.getElementById('table-area').innerHTML =
+        '<div class="empty-state"><h3>No sign-ups found</h3><p>No data available for this view.</p></div>';
+      return;
+    }
+
+    var isAdmin = currentUser.role === 'admin';
+
+    var html = '<table><thead><tr>' +
+      '<th>Time Slot</th><th>Grade</th><th>Student</th>' +
+      '<th>Parent</th><th>Email</th><th>Qty</th><th>Status</th>' +
+      '</tr></thead><tbody>';
+
+    for (var i = 0; i < signups.length; i++) {
+      var s = signups[i];
+      var timeSlot = formatTime(s.start_datetime) + ' - ' + formatTime(s.end_datetime);
+      var statusClass = s.status !== 'none' ? ' status-' + s.status : '';
+
+      html += '<tr class="' + statusClass + '" id="row-' + i + '">' +
+        '<td>' + esc(timeSlot) + '</td>' +
+        '<td>' + esc(s.item) + '</td>' +
+        '<td><strong>' + esc(s.signup_comment || '\u2014') + '</strong></td>' +
+        '<td>' + esc(s.first_name) + ' ' + esc(s.last_name) + '</td>' +
+        '<td>' + esc(s.email) + '</td>' +
+        '<td>' + (s.qty || 1) + '</td>' +
+        '<td>' + (isAdmin ? statusButtonsHtml(i, s.key, s.status) : statusLabelHtml(s.status)) + '</td>' +
+        '</tr>';
+    }
+
+    html += '</tbody></table>';
+    document.getElementById('table-area').innerHTML = html;
+  }
+
+  function statusButtonsHtml(idx, key, current) {
+    var ibActive = current === 'in_building' ? ' active' : '';
+    var ltActive = current === 'late' ? ' active' : '';
+    var cnActive = current === 'cancel' ? ' active' : '';
+
+    var ibTarget = current === 'in_building' ? 'none' : 'in_building';
+    var ltTarget = current === 'late' ? 'none' : 'late';
+    var cnTarget = current === 'cancel' ? 'none' : 'cancel';
+
+    return '<div class="status-btns">' +
+      '<button class="btn-status btn-ib' + ibActive + '" onclick="clickStatus(' + idx + ',\'' + escAttr(key) + '\',\'' + ibTarget + '\')">In Building</button>' +
+      '<button class="btn-status btn-lt' + ltActive + '" onclick="clickStatus(' + idx + ',\'' + escAttr(key) + '\',\'' + ltTarget + '\')">Late</button>' +
+      '<button class="btn-status btn-cn' + cnActive + '" onclick="clickStatus(' + idx + ',\'' + escAttr(key) + '\',\'' + cnTarget + '\')">Cancel</button>' +
+      '</div>';
+  }
+
+  function statusLabelHtml(status) {
+    var labels = { none: 'Pending', in_building: 'In Building', late: 'Late', cancel: 'Cancelled' };
+    return '<span class="status-label sl-' + status + '">' + (labels[status] || status) + '</span>';
+  }
+
+  // ── Status Update ────────────────────────────────────────────
+
+  function clickStatus(idx, key, newStatus) {
+    var row = document.getElementById('row-' + idx);
+    if (row) {
+      var btns = row.querySelectorAll('.btn-status');
+      for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+    }
+
+    google.script.run
+      .withSuccessHandler(function() {
+        loadData();
+      })
+      .withFailureHandler(function(err) {
+        alert('Error: ' + err.message);
+        if (row) {
+          var rbtns = row.querySelectorAll('.btn-status');
+          for (var j = 0; j < rbtns.length; j++) rbtns[j].disabled = false;
+        }
+      })
+      .updateStatus(key, newStatus);
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────
+
+  function formatTime(dt) {
+    if (!dt) return '';
+    var str = String(dt);
+    var parts = str.split(' ');
+    if (parts.length < 2) return str;
+    var date = parts[0];
+    var timeParts = parts[1].split(':');
+    var h = parseInt(timeParts[0], 10);
+    var m = timeParts[1] || '00';
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    if (h > 12) h -= 12;
+    if (h === 0) h = 12;
+    return date + ' ' + h + ':' + m + ' ' + ampm;
+  }
+
+  function esc(str) {
+    if (!str && str !== 0) return '';
+    var d = document.createElement('div');
+    d.textContent = String(str);
+    return d.innerHTML;
+  }
+
+  function escAttr(str) {
+    return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  }
+</script>
+</body>
+</html>
