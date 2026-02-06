@@ -1,8 +1,11 @@
 /**
  * PTC Sign-Up Dashboard — Google Apps Script Web App
  *
- * Data lives in the "SIGN-UPS" sheet (or first sheet).
+ * Data lives in the main data sheet (first sheet).
  * Status tracking lives in a "StatusTracking" sheet tab (auto-created).
+ * CSV uploads merge into the data sheet: fill blanks, never overwrite.
+ *
+ * Structure: 2 slots per grade (6th, 7th, 8th) per 15-min block.
  *
  * Admin: etruslow@waynesboro.k12.va.us
  * Everyone else: read-only
@@ -11,6 +14,23 @@
 var SPREADSHEET_ID = '1FhnS8B4GKz3vA3COT0RGqJpKz4AdDf28Tq-zfvDV8sc';
 var ADMIN_EMAIL = 'etruslow@waynesboro.k12.va.us';
 var STATUS_SHEET_NAME = 'StatusTracking';
+var DATA_SHEET_NAME = null; // null = use first sheet
+
+// Canonical header order for the data sheet
+var HEADERS = [
+  'Sign Up',
+  'Start Date/Time (mm/dd/yyyy)',
+  'End Date/Time (mm/dd/yyyy)',
+  'Location',
+  'Qty',
+  'Item',
+  'First Name',
+  'Last Name',
+  'Email',
+  'Sign Up Comment',
+  'Sign Up Coleader',
+  'Sign Up Timestamp'
+];
 
 // ── Web App Entry ──────────────────────────────────────────────────
 
@@ -25,7 +45,6 @@ function doGet() {
 
 function getCurrentUser() {
   var email = Session.getActiveUser().getEmail();
-  // If email is empty (common in "anyone" deployments), fall back to effective user
   if (!email) {
     email = Session.getEffectiveUser().getEmail();
   }
@@ -35,6 +54,13 @@ function getCurrentUser() {
 
 // ── Data Access ────────────────────────────────────────────────────
 
+function getDataSheet(ss) {
+  if (DATA_SHEET_NAME) {
+    return ss.getSheetByName(DATA_SHEET_NAME) || ss.getSheets()[0];
+  }
+  return ss.getSheets()[0];
+}
+
 /**
  * Get all sign-up data merged with status tracking.
  * @param {string|null} gradeFilter - e.g. "6th Grade" or null for all
@@ -42,62 +68,66 @@ function getCurrentUser() {
  */
 function getSignups(gradeFilter) {
   var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  var sheet = ss.getSheets()[0]; // First sheet has the sign-up data
+  var sheet = getDataSheet(ss);
   var data = sheet.getDataRange().getValues();
 
   if (data.length < 2) return { signups: [], summary: buildEmptySummary() };
 
   var headers = data[0];
   var colMap = buildColumnMap(headers);
-
-  // Load status tracking
   var statusMap = loadStatusMap(ss);
 
   var signups = [];
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
-    var email = valAt(row, colMap, 'email');
-    var firstName = valAt(row, colMap, 'first_name');
-
-    // Skip empty rows
-    if (!email && !firstName) continue;
-
+    var email = str(valAt(row, colMap, 'email'));
+    var firstName = str(valAt(row, colMap, 'first_name'));
+    var item = str(valAt(row, colMap, 'item'));
     var startDt = valAt(row, colMap, 'start_datetime');
     var endDt = valAt(row, colMap, 'end_datetime');
-    var item = valAt(row, colMap, 'item');
 
-    // Build unique key for status tracking
-    var key = buildKey(startDt, endDt, item, email);
+    // Skip completely empty rows (no item means not a real slot)
+    if (!item) continue;
+
+    var startStr = formatDateVal(startDt);
+    var endStr = formatDateVal(endDt);
+
+    // Build unique key for status tracking (use row index as fallback for empty slots)
+    var key = email
+      ? buildKey(startStr, endStr, item, email)
+      : buildKey(startStr, endStr, item, 'row_' + (i + 1));
     var status = statusMap[key] || 'none';
 
-    var grade = item;
-    if (gradeFilter && grade !== gradeFilter) continue;
+    if (gradeFilter && item !== gradeFilter) continue;
 
     signups.push({
-      rowIndex: i + 1, // 1-based sheet row
+      rowIndex: i + 1,
       key: key,
-      sign_up: valAt(row, colMap, 'sign_up'),
-      start_datetime: formatDateVal(startDt),
-      end_datetime: formatDateVal(endDt),
-      location: valAt(row, colMap, 'location'),
+      sign_up: str(valAt(row, colMap, 'sign_up')),
+      start_datetime: startStr,
+      end_datetime: endStr,
+      location: str(valAt(row, colMap, 'location')),
       qty: valAt(row, colMap, 'qty') || 1,
-      item: grade,
+      item: item,
       first_name: firstName,
-      last_name: valAt(row, colMap, 'last_name'),
+      last_name: str(valAt(row, colMap, 'last_name')),
       email: email,
-      signup_comment: valAt(row, colMap, 'signup_comment'),
-      sign_up_coleader: valAt(row, colMap, 'sign_up_coleader'),
+      signup_comment: str(valAt(row, colMap, 'signup_comment')),
+      sign_up_coleader: str(valAt(row, colMap, 'sign_up_coleader')),
       signup_timestamp: formatDateVal(valAt(row, colMap, 'signup_timestamp')),
-      status: status
+      status: status,
+      is_empty_slot: !email && !firstName
     });
   }
 
-  // Sort by start time then by student name (signup_comment)
+  // Sort: start time -> grade -> slot (filled first, empty last)
   signups.sort(function(a, b) {
     if (a.start_datetime < b.start_datetime) return -1;
     if (a.start_datetime > b.start_datetime) return 1;
     if (a.item < b.item) return -1;
     if (a.item > b.item) return 1;
+    // Filled slots before empty
+    if (a.is_empty_slot !== b.is_empty_slot) return a.is_empty_slot ? 1 : -1;
     var nameA = (a.signup_comment || '').toLowerCase();
     var nameB = (b.signup_comment || '').toLowerCase();
     return nameA < nameB ? -1 : nameA > nameB ? 1 : 0;
@@ -107,11 +137,247 @@ function getSignups(gradeFilter) {
   return { signups: signups, summary: summary };
 }
 
+// ── CSV Upload & Merge ─────────────────────────────────────────────
+
 /**
- * Update a student's status. Admin only.
- * @param {string} key - unique row key
- * @param {string} status - 'none', 'in_building', 'late', 'cancel'
+ * Upload CSV content and merge into data sheet.
+ * Matches rows by (start_datetime, end_datetime, item, email).
+ * Fills in blank cells without overwriting existing data.
+ * New rows (no match) are appended.
+ *
+ * @param {string} csvContent - raw CSV text from the uploaded file
+ * @return {Object} { inserted, updated, skipped }
  */
+function uploadCSV(csvContent) {
+  var user = getCurrentUser();
+  if (user.role !== 'admin') {
+    throw new Error('Admin access required');
+  }
+
+  var rows = parseCSV(csvContent);
+  if (rows.length === 0) {
+    return { inserted: 0, updated: 0, skipped: 0 };
+  }
+
+  var csvHeaders = rows[0];
+  var csvColMap = buildColumnMap(csvHeaders);
+
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheet = getDataSheet(ss);
+  var sheetData = sheet.getDataRange().getValues();
+
+  // If the sheet is empty, write headers first
+  if (sheetData.length === 0) {
+    sheet.appendRow(HEADERS);
+    sheetData = [HEADERS];
+  }
+
+  var sheetHeaders = sheetData[0];
+  var sheetColMap = buildColumnMap(sheetHeaders);
+
+  // Build index of existing rows: key -> sheet row index (1-based)
+  var existingIndex = {};
+  for (var i = 1; i < sheetData.length; i++) {
+    var r = sheetData[i];
+    var eStart = formatDateVal(valAt(r, sheetColMap, 'start_datetime'));
+    var eEnd = formatDateVal(valAt(r, sheetColMap, 'end_datetime'));
+    var eItem = str(valAt(r, sheetColMap, 'item'));
+    var eEmail = str(valAt(r, sheetColMap, 'email'));
+    if (eItem) {
+      var eKey = eStart + '|||' + eEnd + '|||' + eItem + '|||' + eEmail;
+      existingIndex[eKey] = i; // 0-based data index
+    }
+  }
+
+  var inserted = 0, updated = 0, skipped = 0;
+
+  for (var c = 1; c < rows.length; c++) {
+    var csvRow = rows[c];
+    // Extract CSV values
+    var cSignUp = csvVal(csvRow, csvColMap, 'sign_up');
+    var cStart = csvVal(csvRow, csvColMap, 'start_datetime');
+    var cEnd = csvVal(csvRow, csvColMap, 'end_datetime');
+    var cLocation = csvVal(csvRow, csvColMap, 'location');
+    var cQty = csvVal(csvRow, csvColMap, 'qty');
+    var cItem = csvVal(csvRow, csvColMap, 'item');
+    var cFirst = csvVal(csvRow, csvColMap, 'first_name');
+    var cLast = csvVal(csvRow, csvColMap, 'last_name');
+    var cEmail = csvVal(csvRow, csvColMap, 'email');
+    var cComment = csvVal(csvRow, csvColMap, 'signup_comment');
+    var cColeader = csvVal(csvRow, csvColMap, 'sign_up_coleader');
+    var cTimestamp = csvVal(csvRow, csvColMap, 'signup_timestamp');
+
+    // Skip rows with no item (not a real entry)
+    if (!cItem) { skipped++; continue; }
+
+    var cKey = cStart + '|||' + cEnd + '|||' + cItem + '|||' + cEmail;
+
+    if (existingIndex.hasOwnProperty(cKey)) {
+      // Existing row: fill in blanks only
+      var dataIdx = existingIndex[cKey];
+      var sheetRow = sheetData[dataIdx];
+      var rowNum = dataIdx + 1; // 1-based sheet row
+      var changed = false;
+
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'sign_up', cSignUp, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'start_datetime', cStart, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'end_datetime', cEnd, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'location', cLocation, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'qty', cQty, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'first_name', cFirst, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'last_name', cLast, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'email', cEmail, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'signup_comment', cComment, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'sign_up_coleader', cColeader, rowNum) || changed;
+      changed = mergeCell(sheet, sheetRow, sheetColMap, 'signup_timestamp', cTimestamp, rowNum) || changed;
+
+      if (changed) updated++;
+      else skipped++;
+    } else {
+      // New row: append using canonical header order
+      var newRow = buildNewRow(sheetHeaders, sheetColMap, {
+        sign_up: cSignUp,
+        start_datetime: cStart,
+        end_datetime: cEnd,
+        location: cLocation,
+        qty: cQty,
+        item: cItem,
+        first_name: cFirst,
+        last_name: cLast,
+        email: cEmail,
+        signup_comment: cComment,
+        sign_up_coleader: cColeader,
+        signup_timestamp: cTimestamp
+      });
+      sheet.appendRow(newRow);
+      inserted++;
+
+      // Add to index so duplicate CSV rows don't double-insert
+      existingIndex[cKey] = sheetData.length + inserted - 1;
+    }
+  }
+
+  SpreadsheetApp.flush();
+  return { inserted: inserted, updated: updated, skipped: skipped };
+}
+
+/**
+ * Merge a single cell: only write if the sheet cell is blank and the CSV value is not.
+ */
+function mergeCell(sheet, sheetRow, colMap, field, csvValue, rowNum) {
+  if (colMap[field] === undefined) return false;
+  var colIdx = colMap[field];
+  var existing = str(sheetRow[colIdx]);
+  if (!existing && csvValue) {
+    sheet.getRange(rowNum, colIdx + 1).setValue(csvValue);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Build a new row array matching the sheet's header order.
+ */
+function buildNewRow(headers, colMap, values) {
+  var row = [];
+  for (var i = 0; i < headers.length; i++) {
+    row.push('');
+  }
+  var fieldMap = {
+    'sign_up': values.sign_up,
+    'start_datetime': values.start_datetime,
+    'end_datetime': values.end_datetime,
+    'location': values.location,
+    'qty': values.qty,
+    'item': values.item,
+    'first_name': values.first_name,
+    'last_name': values.last_name,
+    'email': values.email,
+    'signup_comment': values.signup_comment,
+    'sign_up_coleader': values.sign_up_coleader,
+    'signup_timestamp': values.signup_timestamp
+  };
+  for (var field in fieldMap) {
+    if (colMap[field] !== undefined) {
+      row[colMap[field]] = fieldMap[field] || '';
+    }
+  }
+  return row;
+}
+
+// ── CSV Parser ─────────────────────────────────────────────────────
+
+/**
+ * Simple CSV parser that handles quoted fields with commas/newlines.
+ */
+function parseCSV(text) {
+  var rows = [];
+  var row = [];
+  var field = '';
+  var inQuotes = false;
+  var i = 0;
+
+  while (i < text.length) {
+    var ch = text[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (i + 1 < text.length && text[i + 1] === '"') {
+          field += '"';
+          i += 2;
+        } else {
+          inQuotes = false;
+          i++;
+        }
+      } else {
+        field += ch;
+        i++;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+        i++;
+      } else if (ch === ',') {
+        row.push(field.trim());
+        field = '';
+        i++;
+      } else if (ch === '\r' || ch === '\n') {
+        row.push(field.trim());
+        field = '';
+        if (ch === '\r' && i + 1 < text.length && text[i + 1] === '\n') {
+          i++;
+        }
+        if (row.length > 1 || (row.length === 1 && row[0] !== '')) {
+          rows.push(row);
+        }
+        row = [];
+        i++;
+      } else {
+        field += ch;
+        i++;
+      }
+    }
+  }
+
+  // Last field/row
+  if (field || row.length > 0) {
+    row.push(field.trim());
+    if (row.length > 1 || (row.length === 1 && row[0] !== '')) {
+      rows.push(row);
+    }
+  }
+
+  return rows;
+}
+
+function csvVal(row, colMap, field) {
+  if (colMap[field] === undefined) return '';
+  if (colMap[field] >= row.length) return '';
+  return (row[colMap[field]] || '').toString().trim();
+}
+
+// ── Status ─────────────────────────────────────────────────────────
+
 function updateStatus(key, status) {
   var user = getCurrentUser();
   if (user.role !== 'admin') {
@@ -127,11 +393,9 @@ function updateStatus(key, status) {
   var statusSheet = getOrCreateStatusSheet(ss);
   var data = statusSheet.getDataRange().getValues();
 
-  // Find existing row for this key
   for (var i = 1; i < data.length; i++) {
     if (data[i][0] === key) {
       if (status === 'none') {
-        // Remove the row
         statusSheet.deleteRow(i + 1);
       } else {
         statusSheet.getRange(i + 1, 2).setValue(status);
@@ -141,7 +405,6 @@ function updateStatus(key, status) {
     }
   }
 
-  // Not found — add new row (only if not 'none')
   if (status !== 'none') {
     statusSheet.appendRow([key, status, new Date()]);
   }
@@ -149,10 +412,6 @@ function updateStatus(key, status) {
   return { ok: true };
 }
 
-/**
- * Manually refresh data — just returns fresh data (sheet is always live).
- * Kept as explicit action so admin knows data is current.
- */
 function refreshData(gradeFilter) {
   SpreadsheetApp.flush();
   return getSignups(gradeFilter);
@@ -174,7 +433,6 @@ function loadStatusMap(ss) {
   var sheet = ss.getSheetByName(STATUS_SHEET_NAME);
   var map = {};
   if (!sheet) return map;
-
   var data = sheet.getDataRange().getValues();
   for (var i = 1; i < data.length; i++) {
     if (data[i][0]) {
@@ -194,7 +452,7 @@ function buildColumnMap(headers) {
   var map = {};
   for (var i = 0; i < headers.length; i++) {
     var h = String(headers[i]).trim().toLowerCase();
-    if (h === 'sign up' || h === 'sign-up') map['sign_up'] = i;
+    if (h === 'sign up' || h === 'sign-up' || h === 'sign ups' || h === 'sign-ups') map['sign_up'] = i;
     else if (h.indexOf('start date') !== -1) map['start_datetime'] = i;
     else if (h.indexOf('end date') !== -1) map['end_datetime'] = i;
     else if (h === 'location') map['location'] = i;
@@ -217,6 +475,12 @@ function valAt(row, colMap, field) {
   return val;
 }
 
+function str(val) {
+  if (val === null || val === undefined) return '';
+  if (val instanceof Date) return formatDateVal(val);
+  return String(val).trim();
+}
+
 function formatDateVal(val) {
   if (!val) return '';
   if (val instanceof Date) {
@@ -227,21 +491,27 @@ function formatDateVal(val) {
     var mm = val.getMinutes();
     return m + '/' + d + '/' + y + ' ' + hh + ':' + (mm < 10 ? '0' + mm : mm);
   }
-  return String(val);
+  return String(val).trim();
 }
 
 // ── Summary ────────────────────────────────────────────────────────
 
 function buildSummary(signups) {
   var grades = {};
-  var totals = { total: 0, in_building: 0, late: 0, cancelled: 0, pending: 0 };
+  var totals = { total: 0, in_building: 0, late: 0, cancelled: 0, pending: 0, open_slots: 0 };
 
   for (var i = 0; i < signups.length; i++) {
     var s = signups[i];
     var g = s.item;
 
     if (!grades[g]) {
-      grades[g] = { grade: g, total: 0, in_building: 0, late: 0, cancelled: 0, pending: 0 };
+      grades[g] = { grade: g, total: 0, in_building: 0, late: 0, cancelled: 0, pending: 0, open_slots: 0 };
+    }
+
+    if (s.is_empty_slot) {
+      grades[g].open_slots++;
+      totals.open_slots++;
+      continue;
     }
 
     grades[g].total++;
@@ -253,7 +523,6 @@ function buildSummary(signups) {
     else { grades[g].pending++; totals.pending++; }
   }
 
-  // Sort grade keys naturally
   var gradeList = Object.keys(grades).sort();
   var gradeArray = gradeList.map(function(k) { return grades[k]; });
 
@@ -261,5 +530,5 @@ function buildSummary(signups) {
 }
 
 function buildEmptySummary() {
-  return { grades: [], totals: { total: 0, in_building: 0, late: 0, cancelled: 0, pending: 0 } };
+  return { grades: [], totals: { total: 0, in_building: 0, late: 0, cancelled: 0, pending: 0, open_slots: 0 } };
 }
