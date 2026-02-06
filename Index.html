@@ -611,20 +611,16 @@
       var csvContent = e.target.result;
       google.script.run
         .withSuccessHandler(function(result) {
-          document.getElementById('upload-progress').style.display = 'none';
-          document.getElementById('upload-result').innerHTML =
-            '<div class="upload-result success">' +
-            '<strong>Upload complete!</strong> ' +
-            result.inserted + ' new rows added, ' +
-            result.updated + ' rows updated, ' +
-            result.skipped + ' unchanged.</div>';
-          document.getElementById('btn-do-upload').disabled = true;
+          closeUploadModal();
+          showMsg('Upload complete! ' + result.inserted + ' new, ' +
+                  result.updated + ' updated, ' + result.skipped + ' unchanged.');
           loadData();
         })
         .withFailureHandler(function(err) {
           document.getElementById('upload-progress').style.display = 'none';
           document.getElementById('upload-result').innerHTML =
-            '<div class="upload-result error"><strong>Error:</strong> ' + err.message + '</div>';
+            '<div class="upload-result error"><strong>Error:</strong> ' +
+            (err.message || String(err)) + '</div>';
           document.getElementById('btn-do-upload').disabled = false;
         })
         .uploadCSV(csvContent);
