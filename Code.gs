@@ -77,6 +77,9 @@ function getSignups(gradeFilter) {
   var colMap = buildColumnMap(headers);
   var statusMap = loadStatusMap(ss);
 
+  // Track slot positions for building unique keys
+  var groupCounts = {};
+
   var signups = [];
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
@@ -92,10 +95,11 @@ function getSignups(gradeFilter) {
     var startStr = formatDateVal(startDt);
     var endStr = formatDateVal(endDt);
 
-    // Build unique key for status tracking (use row index as fallback for empty slots)
-    var key = email
-      ? buildKey(startStr, endStr, item, email)
-      : buildKey(startStr, endStr, item, 'row_' + (i + 1));
+    // Build unique key using slot position within (start, end, item) group
+    var groupKey = startStr + '|||' + endStr + '|||' + item;
+    if (!groupCounts[groupKey]) groupCounts[groupKey] = 0;
+    groupCounts[groupKey]++;
+    var key = groupKey + '|||slot_' + groupCounts[groupKey];
     var status = statusMap[key] || 'none';
 
     if (gradeFilter && item !== gradeFilter) continue;
@@ -140,10 +144,51 @@ function getSignups(gradeFilter) {
 // ── CSV Upload & Merge ─────────────────────────────────────────────
 
 /**
+ * Build a slot-position index for rows.
+ * Each row in a (start, end, item) group is numbered sequentially (slot 1, slot 2, etc.).
+ * This ensures that two empty slots for the same grade/time don't collide.
+ *
+ * @param {Array[]} data - 2D array of sheet values (includes header row)
+ * @param {Object} colMap - column mapping from buildColumnMap
+ * @return {Object} { positionKey -> dataIndex (0-based) }
+ */
+function buildSlotIndex(data, colMap) {
+  var groupCounts = {}; // "start|||end|||item" -> count seen so far
+  var index = {};       // "start|||end|||item|||slotNum" -> data row index
+
+  for (var i = 1; i < data.length; i++) {
+    var r = data[i];
+    var rStart = formatDateVal(valAt(r, colMap, 'start_datetime'));
+    var rEnd = formatDateVal(valAt(r, colMap, 'end_datetime'));
+    var rItem = str(valAt(r, colMap, 'item'));
+
+    if (!rItem) continue;
+
+    var groupKey = rStart + '|||' + rEnd + '|||' + rItem;
+    if (!groupCounts[groupKey]) groupCounts[groupKey] = 0;
+    groupCounts[groupKey]++;
+
+    var posKey = groupKey + '|||' + groupCounts[groupKey];
+    index[posKey] = i; // 0-based data index
+  }
+
+  return index;
+}
+
+/**
  * Upload CSV content and merge into data sheet.
- * Matches rows by (start_datetime, end_datetime, item, email).
- * Fills in blank cells without overwriting existing data.
- * New rows (no match) are appended.
+ *
+ * Matching strategy: rows are matched by SLOT POSITION within each
+ * (start_datetime, end_datetime, item) group. E.g. the 1st "8th Grade"
+ * row at 12:00-12:15 in the CSV matches the 1st "8th Grade" row at
+ * 12:00-12:15 in the sheet, the 2nd matches the 2nd, etc.
+ *
+ * This handles empty slots correctly — even if both slots for a grade
+ * are blank (no email/name), they each match to their positional
+ * counterpart in the sheet.
+ *
+ * For matched rows: only blank cells get filled. Existing data is never
+ * overwritten, so you can upload partial exports without losing anything.
  *
  * @param {string} csvContent - raw CSV text from the uploaded file
  * @return {Object} { inserted, updated, skipped }
@@ -175,25 +220,17 @@ function uploadCSV(csvContent) {
   var sheetHeaders = sheetData[0];
   var sheetColMap = buildColumnMap(sheetHeaders);
 
-  // Build index of existing rows: key -> sheet row index (1-based)
-  var existingIndex = {};
-  for (var i = 1; i < sheetData.length; i++) {
-    var r = sheetData[i];
-    var eStart = formatDateVal(valAt(r, sheetColMap, 'start_datetime'));
-    var eEnd = formatDateVal(valAt(r, sheetColMap, 'end_datetime'));
-    var eItem = str(valAt(r, sheetColMap, 'item'));
-    var eEmail = str(valAt(r, sheetColMap, 'email'));
-    if (eItem) {
-      var eKey = eStart + '|||' + eEnd + '|||' + eItem + '|||' + eEmail;
-      existingIndex[eKey] = i; // 0-based data index
-    }
-  }
+  // Build slot-position index for existing sheet rows
+  var slotIndex = buildSlotIndex(sheetData, sheetColMap);
+
+  // Track CSV group counts to assign slot positions
+  var csvGroupCounts = {};
 
   var inserted = 0, updated = 0, skipped = 0;
 
   for (var c = 1; c < rows.length; c++) {
     var csvRow = rows[c];
-    // Extract CSV values
+
     var cSignUp = csvVal(csvRow, csvColMap, 'sign_up');
     var cStart = csvVal(csvRow, csvColMap, 'start_datetime');
     var cEnd = csvVal(csvRow, csvColMap, 'end_datetime');
@@ -207,21 +244,25 @@ function uploadCSV(csvContent) {
     var cColeader = csvVal(csvRow, csvColMap, 'sign_up_coleader');
     var cTimestamp = csvVal(csvRow, csvColMap, 'signup_timestamp');
 
-    // Skip rows with no item (not a real entry)
+    // Skip rows with no item (not a real slot)
     if (!cItem) { skipped++; continue; }
 
-    var cKey = cStart + '|||' + cEnd + '|||' + cItem + '|||' + cEmail;
+    // Determine this CSV row's slot position within its group
+    var groupKey = cStart + '|||' + cEnd + '|||' + cItem;
+    if (!csvGroupCounts[groupKey]) csvGroupCounts[groupKey] = 0;
+    csvGroupCounts[groupKey]++;
+    var slotNum = csvGroupCounts[groupKey];
 
-    if (existingIndex.hasOwnProperty(cKey)) {
-      // Existing row: fill in blanks only
-      var dataIdx = existingIndex[cKey];
+    var posKey = groupKey + '|||' + slotNum;
+
+    if (slotIndex.hasOwnProperty(posKey)) {
+      // Matched to existing sheet row by slot position — fill blanks only
+      var dataIdx = slotIndex[posKey];
       var sheetRow = sheetData[dataIdx];
       var rowNum = dataIdx + 1; // 1-based sheet row
       var changed = false;
 
       changed = mergeCell(sheet, sheetRow, sheetColMap, 'sign_up', cSignUp, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'start_datetime', cStart, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'end_datetime', cEnd, rowNum) || changed;
       changed = mergeCell(sheet, sheetRow, sheetColMap, 'location', cLocation, rowNum) || changed;
       changed = mergeCell(sheet, sheetRow, sheetColMap, 'qty', cQty, rowNum) || changed;
       changed = mergeCell(sheet, sheetRow, sheetColMap, 'first_name', cFirst, rowNum) || changed;
@@ -234,7 +275,7 @@ function uploadCSV(csvContent) {
       if (changed) updated++;
       else skipped++;
     } else {
-      // New row: append using canonical header order
+      // No matching slot position in sheet — append as new row
       var newRow = buildNewRow(sheetHeaders, sheetColMap, {
         sign_up: cSignUp,
         start_datetime: cStart,
@@ -251,9 +292,6 @@ function uploadCSV(csvContent) {
       });
       sheet.appendRow(newRow);
       inserted++;
-
-      // Add to index so duplicate CSV rows don't double-insert
-      existingIndex[cKey] = sheetData.length + inserted - 1;
     }
   }
 
