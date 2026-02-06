@@ -62,9 +62,29 @@ function getDataSheet(ss) {
 }
 
 /**
+ * Normalize any date value to a consistent string for comparison.
+ * Handles: Date objects, "2/16/2026 12:00", "2/16/2026 12:00:00", etc.
+ */
+function normDate(val) {
+  if (!val) return '';
+  if (val instanceof Date) {
+    var m = val.getMonth() + 1;
+    var d = val.getDate();
+    var y = val.getFullYear();
+    var hh = val.getHours();
+    var mm = val.getMinutes();
+    return m + '/' + d + '/' + y + ' ' + hh + ':' + (mm < 10 ? '0' + mm : mm);
+  }
+  // String: strip seconds if present, trim
+  var s = String(val).trim();
+  // "2/16/2026 12:00:00" -> "2/16/2026 12:00"
+  var match = s.match(/^(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2})(:\d{2})?$/);
+  if (match) return match[1];
+  return s;
+}
+
+/**
  * Get all sign-up data merged with status tracking.
- * @param {string|null} gradeFilter - e.g. "6th Grade" or null for all
- * @return {Object} { signups: [...], summary: {...} }
  */
 function getSignups(gradeFilter) {
   var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
@@ -77,7 +97,9 @@ function getSignups(gradeFilter) {
   var colMap = buildColumnMap(headers);
   var statusMap = loadStatusMap(ss);
 
+  var groupCounts = {};
   var signups = [];
+
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
     var email = str(valAt(row, colMap, 'email'));
@@ -86,16 +108,15 @@ function getSignups(gradeFilter) {
     var startDt = valAt(row, colMap, 'start_datetime');
     var endDt = valAt(row, colMap, 'end_datetime');
 
-    // Skip completely empty rows (no item means not a real slot)
     if (!item) continue;
 
-    var startStr = formatDateVal(startDt);
-    var endStr = formatDateVal(endDt);
+    var startStr = normDate(startDt);
+    var endStr = normDate(endDt);
 
-    // Build unique key for status tracking (use row index as fallback for empty slots)
-    var key = email
-      ? buildKey(startStr, endStr, item, email)
-      : buildKey(startStr, endStr, item, 'row_' + (i + 1));
+    var groupKey = startStr + '|||' + endStr + '|||' + item;
+    if (!groupCounts[groupKey]) groupCounts[groupKey] = 0;
+    groupCounts[groupKey]++;
+    var key = groupKey + '|||slot_' + groupCounts[groupKey];
     var status = statusMap[key] || 'none';
 
     if (gradeFilter && item !== gradeFilter) continue;
@@ -114,39 +135,60 @@ function getSignups(gradeFilter) {
       email: email,
       signup_comment: str(valAt(row, colMap, 'signup_comment')),
       sign_up_coleader: str(valAt(row, colMap, 'sign_up_coleader')),
-      signup_timestamp: formatDateVal(valAt(row, colMap, 'signup_timestamp')),
+      signup_timestamp: normDate(valAt(row, colMap, 'signup_timestamp')),
       status: status,
       is_empty_slot: !email && !firstName
     });
   }
 
-  // Sort: start time -> grade -> slot (filled first, empty last)
   signups.sort(function(a, b) {
     if (a.start_datetime < b.start_datetime) return -1;
     if (a.start_datetime > b.start_datetime) return 1;
     if (a.item < b.item) return -1;
     if (a.item > b.item) return 1;
-    // Filled slots before empty
     if (a.is_empty_slot !== b.is_empty_slot) return a.is_empty_slot ? 1 : -1;
     var nameA = (a.signup_comment || '').toLowerCase();
     var nameB = (b.signup_comment || '').toLowerCase();
     return nameA < nameB ? -1 : nameA > nameB ? 1 : 0;
   });
 
-  var summary = buildSummary(signups);
-  return { signups: signups, summary: summary };
+  return { signups: signups, summary: buildSummary(signups) };
 }
 
 // ── CSV Upload & Merge ─────────────────────────────────────────────
 
 /**
+ * Build slot-position index using normalized dates.
+ */
+function buildSlotIndex(data, colMap) {
+  var groupCounts = {};
+  var index = {};
+
+  for (var i = 1; i < data.length; i++) {
+    var r = data[i];
+    var rStart = normDate(valAt(r, colMap, 'start_datetime'));
+    var rEnd = normDate(valAt(r, colMap, 'end_datetime'));
+    var rItem = str(valAt(r, colMap, 'item'));
+
+    if (!rItem) continue;
+
+    var groupKey = rStart + '|||' + rEnd + '|||' + rItem;
+    if (!groupCounts[groupKey]) groupCounts[groupKey] = 0;
+    groupCounts[groupKey]++;
+
+    var posKey = groupKey + '|||' + groupCounts[groupKey];
+    index[posKey] = i;
+  }
+
+  return index;
+}
+
+/**
  * Upload CSV content and merge into data sheet.
- * Matches rows by (start_datetime, end_datetime, item, email).
- * Fills in blank cells without overwriting existing data.
- * New rows (no match) are appended.
+ * Uses batch writes (setValues) instead of individual setValue calls for speed.
  *
- * @param {string} csvContent - raw CSV text from the uploaded file
- * @return {Object} { inserted, updated, skipped }
+ * Matching: by slot position within (start, end, item) groups.
+ * Merge: only fills blank cells, never overwrites.
  */
 function uploadCSV(csvContent) {
   var user = getCurrentUser();
@@ -154,107 +196,126 @@ function uploadCSV(csvContent) {
     throw new Error('Admin access required');
   }
 
+  if (!csvContent || !csvContent.trim()) {
+    throw new Error('CSV file is empty');
+  }
+
   var rows = parseCSV(csvContent);
-  if (rows.length === 0) {
-    return { inserted: 0, updated: 0, skipped: 0 };
+  if (rows.length < 2) {
+    throw new Error('CSV has no data rows (only ' + rows.length + ' row found)');
   }
 
   var csvHeaders = rows[0];
   var csvColMap = buildColumnMap(csvHeaders);
 
+  // Verify we can at least find the Item column
+  if (csvColMap['item'] === undefined) {
+    throw new Error('Could not find "Item" column in CSV. Found headers: ' + csvHeaders.join(', '));
+  }
+
   var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   var sheet = getDataSheet(ss);
   var sheetData = sheet.getDataRange().getValues();
 
-  // If the sheet is empty, write headers first
-  if (sheetData.length === 0) {
-    sheet.appendRow(HEADERS);
-    sheetData = [HEADERS];
+  var isNewSheet = (sheetData.length === 0);
+
+  // If sheet is empty, write all CSV data directly as a batch
+  if (isNewSheet || sheetData.length < 2) {
+    return writeFullCSV(sheet, rows, csvColMap, isNewSheet ? null : sheetData[0]);
   }
 
   var sheetHeaders = sheetData[0];
   var sheetColMap = buildColumnMap(sheetHeaders);
+  var numCols = sheetHeaders.length;
 
-  // Build index of existing rows: key -> sheet row index (1-based)
-  var existingIndex = {};
-  for (var i = 1; i < sheetData.length; i++) {
-    var r = sheetData[i];
-    var eStart = formatDateVal(valAt(r, sheetColMap, 'start_datetime'));
-    var eEnd = formatDateVal(valAt(r, sheetColMap, 'end_datetime'));
-    var eItem = str(valAt(r, sheetColMap, 'item'));
-    var eEmail = str(valAt(r, sheetColMap, 'email'));
-    if (eItem) {
-      var eKey = eStart + '|||' + eEnd + '|||' + eItem + '|||' + eEmail;
-      existingIndex[eKey] = i; // 0-based data index
-    }
-  }
+  // Build slot-position index for existing sheet rows
+  var slotIndex = buildSlotIndex(sheetData, sheetColMap);
 
+  // Track which sheet rows need updating (collect changes, write in batch)
+  var csvGroupCounts = {};
+  var rowsToAppend = [];
   var inserted = 0, updated = 0, skipped = 0;
+
+  // Fields we'll try to merge (excluding start/end/item which are the fixed slot identifiers)
+  var mergeFields = ['sign_up', 'location', 'qty', 'first_name', 'last_name',
+                     'email', 'signup_comment', 'sign_up_coleader', 'signup_timestamp'];
 
   for (var c = 1; c < rows.length; c++) {
     var csvRow = rows[c];
-    // Extract CSV values
-    var cSignUp = csvVal(csvRow, csvColMap, 'sign_up');
+    var cItem = csvVal(csvRow, csvColMap, 'item');
     var cStart = csvVal(csvRow, csvColMap, 'start_datetime');
     var cEnd = csvVal(csvRow, csvColMap, 'end_datetime');
-    var cLocation = csvVal(csvRow, csvColMap, 'location');
-    var cQty = csvVal(csvRow, csvColMap, 'qty');
-    var cItem = csvVal(csvRow, csvColMap, 'item');
-    var cFirst = csvVal(csvRow, csvColMap, 'first_name');
-    var cLast = csvVal(csvRow, csvColMap, 'last_name');
-    var cEmail = csvVal(csvRow, csvColMap, 'email');
-    var cComment = csvVal(csvRow, csvColMap, 'signup_comment');
-    var cColeader = csvVal(csvRow, csvColMap, 'sign_up_coleader');
-    var cTimestamp = csvVal(csvRow, csvColMap, 'signup_timestamp');
 
-    // Skip rows with no item (not a real entry)
     if (!cItem) { skipped++; continue; }
 
-    var cKey = cStart + '|||' + cEnd + '|||' + cItem + '|||' + cEmail;
+    var groupKey = normDate(cStart) + '|||' + normDate(cEnd) + '|||' + cItem;
+    if (!csvGroupCounts[groupKey]) csvGroupCounts[groupKey] = 0;
+    csvGroupCounts[groupKey]++;
+    var slotNum = csvGroupCounts[groupKey];
+    var posKey = groupKey + '|||' + slotNum;
 
-    if (existingIndex.hasOwnProperty(cKey)) {
-      // Existing row: fill in blanks only
-      var dataIdx = existingIndex[cKey];
+    // Extract all CSV values for this row
+    var csvValues = {};
+    csvValues['sign_up'] = csvVal(csvRow, csvColMap, 'sign_up');
+    csvValues['start_datetime'] = cStart;
+    csvValues['end_datetime'] = cEnd;
+    csvValues['location'] = csvVal(csvRow, csvColMap, 'location');
+    csvValues['qty'] = csvVal(csvRow, csvColMap, 'qty');
+    csvValues['item'] = cItem;
+    csvValues['first_name'] = csvVal(csvRow, csvColMap, 'first_name');
+    csvValues['last_name'] = csvVal(csvRow, csvColMap, 'last_name');
+    csvValues['email'] = csvVal(csvRow, csvColMap, 'email');
+    csvValues['signup_comment'] = csvVal(csvRow, csvColMap, 'signup_comment');
+    csvValues['sign_up_coleader'] = csvVal(csvRow, csvColMap, 'sign_up_coleader');
+    csvValues['signup_timestamp'] = csvVal(csvRow, csvColMap, 'signup_timestamp');
+
+    if (slotIndex.hasOwnProperty(posKey)) {
+      // Matched existing row — check for blanks to fill
+      var dataIdx = slotIndex[posKey];
       var sheetRow = sheetData[dataIdx];
-      var rowNum = dataIdx + 1; // 1-based sheet row
+      var rowNum = dataIdx + 1;
       var changed = false;
 
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'sign_up', cSignUp, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'start_datetime', cStart, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'end_datetime', cEnd, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'location', cLocation, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'qty', cQty, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'first_name', cFirst, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'last_name', cLast, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'email', cEmail, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'signup_comment', cComment, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'sign_up_coleader', cColeader, rowNum) || changed;
-      changed = mergeCell(sheet, sheetRow, sheetColMap, 'signup_timestamp', cTimestamp, rowNum) || changed;
+      for (var f = 0; f < mergeFields.length; f++) {
+        var field = mergeFields[f];
+        if (sheetColMap[field] === undefined) continue;
+        var colIdx = sheetColMap[field];
+        var existing = str(sheetRow[colIdx]);
+        var csvV = csvValues[field];
+        if (!existing && csvV) {
+          // Update in the in-memory array too so we track what's changed
+          sheetData[dataIdx][colIdx] = csvV;
+          changed = true;
+        }
+      }
 
       if (changed) updated++;
       else skipped++;
     } else {
-      // New row: append using canonical header order
-      var newRow = buildNewRow(sheetHeaders, sheetColMap, {
-        sign_up: cSignUp,
-        start_datetime: cStart,
-        end_datetime: cEnd,
-        location: cLocation,
-        qty: cQty,
-        item: cItem,
-        first_name: cFirst,
-        last_name: cLast,
-        email: cEmail,
-        signup_comment: cComment,
-        sign_up_coleader: cColeader,
-        signup_timestamp: cTimestamp
-      });
-      sheet.appendRow(newRow);
+      // New row — build and queue for append
+      var newRow = [];
+      for (var n = 0; n < numCols; n++) newRow.push('');
+      for (var field2 in csvValues) {
+        if (sheetColMap[field2] !== undefined) {
+          newRow[sheetColMap[field2]] = csvValues[field2] || '';
+        }
+      }
+      rowsToAppend.push(newRow);
       inserted++;
-
-      // Add to index so duplicate CSV rows don't double-insert
-      existingIndex[cKey] = sheetData.length + inserted - 1;
     }
+  }
+
+  // Batch write: update existing rows (write entire data block at once)
+  if (updated > 0) {
+    var range = sheet.getRange(1, 1, sheetData.length, numCols);
+    range.setValues(sheetData);
+  }
+
+  // Batch write: append new rows
+  if (rowsToAppend.length > 0) {
+    var startRow = sheet.getLastRow() + 1;
+    var appendRange = sheet.getRange(startRow, 1, rowsToAppend.length, numCols);
+    appendRange.setValues(rowsToAppend);
   }
 
   SpreadsheetApp.flush();
@@ -262,54 +323,49 @@ function uploadCSV(csvContent) {
 }
 
 /**
- * Merge a single cell: only write if the sheet cell is blank and the CSV value is not.
+ * Write an entire CSV to an empty or header-only sheet as a batch.
  */
-function mergeCell(sheet, sheetRow, colMap, field, csvValue, rowNum) {
-  if (colMap[field] === undefined) return false;
-  var colIdx = colMap[field];
-  var existing = str(sheetRow[colIdx]);
-  if (!existing && csvValue) {
-    sheet.getRange(rowNum, colIdx + 1).setValue(csvValue);
-    return true;
-  }
-  return false;
-}
+function writeFullCSV(sheet, csvRows, csvColMap, existingHeaderRow) {
+  var headers = existingHeaderRow || HEADERS;
 
-/**
- * Build a new row array matching the sheet's header order.
- */
-function buildNewRow(headers, colMap, values) {
-  var row = [];
-  for (var i = 0; i < headers.length; i++) {
-    row.push('');
-  }
-  var fieldMap = {
-    'sign_up': values.sign_up,
-    'start_datetime': values.start_datetime,
-    'end_datetime': values.end_datetime,
-    'location': values.location,
-    'qty': values.qty,
-    'item': values.item,
-    'first_name': values.first_name,
-    'last_name': values.last_name,
-    'email': values.email,
-    'signup_comment': values.signup_comment,
-    'sign_up_coleader': values.sign_up_coleader,
-    'signup_timestamp': values.signup_timestamp
-  };
-  for (var field in fieldMap) {
-    if (colMap[field] !== undefined) {
-      row[colMap[field]] = fieldMap[field] || '';
+  // Build column map for the target headers
+  var targetColMap = buildColumnMap(headers);
+  var numCols = headers.length;
+
+  var outputRows = [headers];
+
+  for (var i = 1; i < csvRows.length; i++) {
+    var csvRow = csvRows[i];
+    var cItem = csvVal(csvRow, csvColMap, 'item');
+    if (!cItem) continue;
+
+    var newRow = [];
+    for (var n = 0; n < numCols; n++) newRow.push('');
+
+    var allFields = ['sign_up', 'start_datetime', 'end_datetime', 'location', 'qty',
+                     'item', 'first_name', 'last_name', 'email', 'signup_comment',
+                     'sign_up_coleader', 'signup_timestamp'];
+    for (var f = 0; f < allFields.length; f++) {
+      var field = allFields[f];
+      if (targetColMap[field] !== undefined) {
+        newRow[targetColMap[field]] = csvVal(csvRow, csvColMap, field);
+      }
     }
+    outputRows.push(newRow);
   }
-  return row;
+
+  // Clear and write all at once
+  sheet.clear();
+  if (outputRows.length > 0) {
+    sheet.getRange(1, 1, outputRows.length, numCols).setValues(outputRows);
+  }
+
+  SpreadsheetApp.flush();
+  return { inserted: outputRows.length - 1, updated: 0, skipped: 0 };
 }
 
 // ── CSV Parser ─────────────────────────────────────────────────────
 
-/**
- * Simple CSV parser that handles quoted fields with commas/newlines.
- */
 function parseCSV(text) {
   var rows = [];
   var row = [];
@@ -359,7 +415,6 @@ function parseCSV(text) {
     }
   }
 
-  // Last field/row
   if (field || row.length > 0) {
     row.push(field.trim());
     if (row.length > 1 || (row.length === 1 && row[0] !== '')) {
@@ -477,21 +532,12 @@ function valAt(row, colMap, field) {
 
 function str(val) {
   if (val === null || val === undefined) return '';
-  if (val instanceof Date) return formatDateVal(val);
+  if (val instanceof Date) return normDate(val);
   return String(val).trim();
 }
 
 function formatDateVal(val) {
-  if (!val) return '';
-  if (val instanceof Date) {
-    var m = val.getMonth() + 1;
-    var d = val.getDate();
-    var y = val.getFullYear();
-    var hh = val.getHours();
-    var mm = val.getMinutes();
-    return m + '/' + d + '/' + y + ' ' + hh + ':' + (mm < 10 ? '0' + mm : mm);
-  }
-  return String(val).trim();
+  return normDate(val);
 }
 
 // ── Summary ────────────────────────────────────────────────────────
