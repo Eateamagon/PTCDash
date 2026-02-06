@@ -4,13 +4,15 @@
   <base target="_top">
   <style>
     :root {
-      --bg: #f5f7fa;
+      --bg: #f7f5fa;
       --card: #ffffff;
-      --primary: #2c5282;
-      --primary-light: #ebf4ff;
-      --text: #2d3748;
-      --text-light: #718096;
-      --border: #e2e8f0;
+      --primary: #4A2072;
+      --primary-light: #f0e6f6;
+      --gold: #C8A415;
+      --gold-light: #fdf6d8;
+      --text: #2d2740;
+      --text-light: #6b6280;
+      --border: #e0dae8;
       --green: #38a169;
       --green-bg: #c6f6d5;
       --yellow: #d69e2e;
@@ -46,7 +48,7 @@
       width: 40px;
       height: 40px;
       border: 4px solid var(--border);
-      border-top-color: var(--primary);
+      border-top-color: var(--gold);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
@@ -54,16 +56,24 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     .topbar {
-      background: var(--primary);
+      background: linear-gradient(135deg, var(--primary) 0%, #5C2D91 100%);
       color: white;
       padding: 0.75rem 1.5rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      box-shadow: 0 2px 8px rgba(74,32,114,0.3);
+      border-bottom: 3px solid var(--gold);
     }
 
     .topbar h1 { font-size: 1.2rem; }
+
+    .topbar .kcms-label {
+      font-weight: 800;
+      color: var(--gold);
+      margin-right: 0.4rem;
+      letter-spacing: 1px;
+    }
 
     .topbar-right {
       display: flex;
@@ -116,8 +126,8 @@
     .btn:active { transform: translateY(0); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
-    .btn-sync { background: var(--green); color: white; }
-    .btn-upload { background: var(--primary); color: white; }
+    .btn-sync { background: var(--primary); color: white; }
+    .btn-upload { background: var(--gold); color: #2d2740; font-weight: 600; }
 
     #csv-file-input { display: none; }
 
@@ -159,7 +169,7 @@
 
     .date-tab.active {
       color: var(--primary);
-      border-bottom-color: var(--primary);
+      border-bottom-color: var(--gold);
     }
 
     .summary-bar {
@@ -181,8 +191,8 @@
       user-select: none;
     }
 
-    .summary-card:hover { border-color: var(--primary); }
-    .summary-card.active { border-color: var(--primary); background: var(--primary-light); }
+    .summary-card:hover { border-color: var(--gold); }
+    .summary-card.active { border-color: var(--gold); background: var(--gold-light); }
 
     .summary-card h3 {
       font-size: 0.8rem;
@@ -195,7 +205,7 @@
     .summary-card .count {
       font-size: 1.8rem;
       font-weight: 700;
-      color: var(--primary);
+      color: var(--gold);
     }
 
     .summary-card .sub-count {
@@ -453,7 +463,7 @@
 <!-- Dashboard -->
 <div id="dashboard" style="display:none">
   <div class="topbar">
-    <h1>PTC Sign-Up Dashboard</h1>
+    <h1><span class="kcms-label">KCMS</span> PTC Sign-Up Dashboard</h1>
     <div class="topbar-right">
       <span id="user-info"></span>
     </div>
@@ -501,7 +511,7 @@
     </div>
     <div class="modal-actions">
       <button class="btn btn-cancel-modal" onclick="closeUploadModal()">Cancel</button>
-      <button class="btn btn-sync" id="btn-do-upload" onclick="doUpload()" disabled>Upload &amp; Merge</button>
+      <button class="btn btn-upload" id="btn-do-upload" onclick="doUpload()" disabled>Upload &amp; Merge</button>
     </div>
   </div>
 </div>
@@ -558,13 +568,13 @@
         allSignups = result.signups;
         allSummary = result.summary;
         renderDateTabs();
-        applyDateFilter();
+        applyFilters();
         showMsg('Last refreshed: ' + new Date().toLocaleTimeString());
       })
       .withFailureHandler(function(err) {
         showMsg('Error: ' + err.message);
       })
-      .getSignups(currentGrade);
+      .getSignups(null);
   }
 
   function doRefresh() {
@@ -577,7 +587,7 @@
         allSignups = result.signups;
         allSummary = result.summary;
         renderDateTabs();
-        applyDateFilter();
+        applyFilters();
         showMsg('Refreshed: ' + new Date().toLocaleTimeString());
         btn.disabled = false;
       })
@@ -585,12 +595,12 @@
         showMsg('Error: ' + err.message);
         btn.disabled = false;
       })
-      .refreshData(currentGrade);
+      .refreshData(null);
   }
 
   function filterGrade(grade) {
     currentGrade = grade;
-    loadData();
+    applyFilters();
   }
 
   // ── Date Filtering ──────────────────────────────────────────
@@ -647,7 +657,7 @@
   function filterDate(date) {
     currentDate = date;
     renderDateTabs();
-    applyDateFilter();
+    applyFilters();
   }
 
   function filterSignupsByDate(signups) {
@@ -662,8 +672,18 @@
     return filtered;
   }
 
-  function filterSummaryByDate(signups) {
-    // Recompute summary from filtered signups
+  function filterSignupsByGrade(signups) {
+    if (currentGrade === null) return signups;
+    var filtered = [];
+    for (var i = 0; i < signups.length; i++) {
+      if (signups[i].item === currentGrade) {
+        filtered.push(signups[i]);
+      }
+    }
+    return filtered;
+  }
+
+  function computeSummary(signups) {
     var grades = {};
     var totals = { total: 0, in_building: 0, late: 0, cancelled: 0, pending: 0, open_slots: 0 };
 
@@ -698,14 +718,15 @@
     return { totals: totals, grades: gradeList };
   }
 
-  function applyDateFilter() {
-    var filtered = filterSignupsByDate(allSignups);
-    if (currentDate !== null) {
-      renderSummary(filterSummaryByDate(filtered));
-    } else {
-      renderSummary(allSummary);
-    }
-    renderTable(filtered);
+  function applyFilters() {
+    // Date filter first for summary (so grade cards show date-filtered counts)
+    var dateFiltered = filterSignupsByDate(allSignups);
+    var summary = (currentDate !== null) ? computeSummary(dateFiltered) : allSummary;
+    renderSummary(summary);
+
+    // Then apply grade filter for the table
+    var tableData = filterSignupsByGrade(dateFiltered);
+    renderTable(tableData);
   }
 
   // ── CSV Upload ───────────────────────────────────────────────
