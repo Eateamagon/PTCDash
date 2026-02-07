@@ -34,19 +34,60 @@ var HEADERS = [
 
 // ── Web App Entry ──────────────────────────────────────────────────
 
+/**
+ * DEPLOYMENT INSTRUCTIONS:
+ * 1. In Apps Script editor, click Deploy > New deployment
+ * 2. Select type: "Web app"
+ * 3. Execute as: "Me" (your account — so the spreadsheet is always accessible)
+ * 4. Who has access: "Anyone" (or "Anyone within [your domain]")
+ * 5. Click Deploy, then authorize when prompted
+ *
+ * IMPORTANT: After changing code, create a NEW deployment (not just save).
+ * If users get "unable to open file", re-deploy with a new version.
+ */
 function doGet() {
-  return HtmlService.createHtmlOutputFromFile('Index')
-    .setTitle('PTC Sign-Up Dashboard')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  try {
+    return HtmlService.createHtmlOutputFromFile('Index')
+      .setTitle('KCMS PTC Sign-Up Dashboard')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  } catch (e) {
+    return HtmlService.createHtmlOutput(
+      '<h2>Dashboard Error</h2><p>' + e.message + '</p>' +
+      '<p>Please contact the administrator.</p>'
+    );
+  }
+}
+
+/**
+ * Run this function ONCE manually (Run > authorize) to grant the script
+ * permission to access the spreadsheet. Without this, the web app will
+ * show "Sorry, unable to open the file at this time."
+ */
+function authorizeScript() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var name = ss.getName();
+  Logger.log('Authorization successful. Spreadsheet: ' + name);
+  getOrCreateStatusSheet(ss);
+  Logger.log('StatusTracking sheet ready.');
 }
 
 // ── Auth ───────────────────────────────────────────────────────────
 
 function getCurrentUser() {
-  var email = Session.getActiveUser().getEmail();
+  var email = '';
+  try {
+    email = Session.getActiveUser().getEmail();
+  } catch (e) { /* may fail depending on deployment settings */ }
   if (!email) {
-    email = Session.getEffectiveUser().getEmail();
+    try {
+      email = Session.getEffectiveUser().getEmail();
+    } catch (e) { /* fallback */ }
+  }
+  // If deployed as "Execute as: Me" with "Anyone" access, getActiveUser()
+  // may return empty for non-Google users. Default to read-only.
+  if (!email) {
+    return { email: 'anonymous', role: 'readonly' };
   }
   var role = (email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) ? 'admin' : 'readonly';
   return { email: email, role: role };
@@ -87,7 +128,12 @@ function normDate(val) {
  * Get all sign-up data merged with status tracking.
  */
 function getSignups(gradeFilter) {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var ss;
+  try {
+    ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  } catch (e) {
+    throw new Error('Cannot access spreadsheet. Run authorizeScript() from the Apps Script editor first. (' + e.message + ')');
+  }
   var sheet = getDataSheet(ss);
   var data = sheet.getDataRange().getValues();
 
