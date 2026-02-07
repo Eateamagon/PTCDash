@@ -135,6 +135,15 @@
       font-size: 0.85rem;
       color: var(--text-light);
       flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .refresh-timer {
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      color: var(--primary);
     }
 
     .toolbar-divider {
@@ -238,6 +247,102 @@
     .dot-yellow { background: var(--yellow); }
     .dot-red { background: var(--red); }
     .dot-gray { background: #a0aec0; }
+
+    /* Main content layout with sidebar */
+    .content-wrapper {
+      display: flex;
+    }
+
+    .timeline-sidebar {
+      width: 70px;
+      min-width: 70px;
+      background: var(--card);
+      border-right: 2px solid var(--border);
+      position: relative;
+      padding: 0.5rem 0;
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 160px);
+    }
+
+    .timeline-header {
+      text-align: center;
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-light);
+      letter-spacing: 0.5px;
+      padding: 0.25rem 0 0.4rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .timeline-clock {
+      text-align: center;
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--primary);
+      padding: 0.35rem 0;
+      border-bottom: 1px solid var(--border);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .timeline-slots {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      padding: 0.25rem 0;
+    }
+
+    .timeline-slot {
+      font-size: 0.6rem;
+      text-align: center;
+      padding: 0.3rem 0.15rem;
+      color: var(--text-light);
+      border-bottom: 1px solid var(--border);
+      position: relative;
+      line-height: 1.2;
+    }
+
+    .timeline-slot.tl-past {
+      color: #b0a8bf;
+    }
+
+    .timeline-slot.tl-active {
+      background: var(--gold-light);
+      color: var(--primary);
+      font-weight: 700;
+      border-left: 3px solid var(--gold);
+    }
+
+    .timeline-slot.tl-future {
+      color: var(--text);
+    }
+
+    .timeline-now-line {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: var(--red);
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    .timeline-now-line::before {
+      content: '';
+      position: absolute;
+      left: -3px;
+      top: -3px;
+      width: 8px;
+      height: 8px;
+      background: var(--red);
+      border-radius: 50%;
+    }
+
+    .main-content {
+      flex: 1;
+      min-width: 0;
+    }
 
     .table-container { padding: 0 1.5rem 2rem; }
 
@@ -449,6 +554,7 @@
       .status-btns { flex-direction: column; }
       .topbar { flex-direction: column; gap: 0.5rem; text-align: center; }
       .toolbar { justify-content: center; }
+      .timeline-sidebar { display: none; }
     }
   </style>
 </head>
@@ -473,24 +579,37 @@
     <button class="btn btn-sync" id="btn-refresh" onclick="doRefresh()">Refresh Data</button>
     <div class="toolbar-divider" id="admin-divider" style="display:none"></div>
     <button class="btn btn-upload" id="btn-upload" style="display:none" onclick="openUploadModal()">Upload CSV</button>
-    <span class="toolbar-status" id="toolbar-status"></span>
+    <span class="toolbar-status" id="toolbar-status">
+      <span id="toolbar-msg"></span>
+      <span class="refresh-timer" id="refresh-timer"></span>
+    </span>
   </div>
 
   <div class="date-tabs" id="date-tabs"></div>
 
-  <div class="summary-bar" id="summary-bar"></div>
+  <div class="content-wrapper">
+    <div class="timeline-sidebar" id="timeline-sidebar">
+      <div class="timeline-header">EST Time</div>
+      <div class="timeline-clock" id="timeline-clock"></div>
+      <div class="timeline-slots" id="timeline-slots"></div>
+    </div>
 
-  <div class="table-container">
-    <div class="table-header">
-      <h2 id="table-title">All Grades</h2>
-      <div class="legend">
-        <span class="legend-item"><span class="dot dot-green"></span> In Building</span>
-        <span class="legend-item"><span class="dot dot-yellow"></span> Late</span>
-        <span class="legend-item"><span class="dot dot-red"></span> Cancelled</span>
-        <span class="legend-item"><span class="dot dot-gray"></span> Pending</span>
+    <div class="main-content">
+      <div class="summary-bar" id="summary-bar"></div>
+
+      <div class="table-container">
+        <div class="table-header">
+          <h2 id="table-title">All Grades</h2>
+          <div class="legend">
+            <span class="legend-item"><span class="dot dot-green"></span> In Building</span>
+            <span class="legend-item"><span class="dot dot-yellow"></span> Late</span>
+            <span class="legend-item"><span class="dot dot-red"></span> Cancelled</span>
+            <span class="legend-item"><span class="dot dot-gray"></span> Pending</span>
+          </div>
+        </div>
+        <div id="table-area"></div>
       </div>
     </div>
-    <div id="table-area"></div>
   </div>
 </div>
 
@@ -523,6 +642,9 @@
   var selectedFile = null;
   var allSignups = [];
   var allSummary = null;
+  var lastRefreshTime = null;
+  var refreshTimerInterval = null;
+  var timelineInterval = null;
 
   // ── Init ─────────────────────────────────────────────────────
 
@@ -552,13 +674,30 @@
     }
 
     setupDragDrop();
+    startTimelineClock();
     loadData();
   }
 
   // ── Data Loading ─────────────────────────────────────────────
 
   function showMsg(msg) {
-    document.getElementById('toolbar-status').textContent = msg;
+    document.getElementById('toolbar-msg').textContent = msg;
+  }
+
+  function startRefreshTimer() {
+    lastRefreshTime = Date.now();
+    if (refreshTimerInterval) clearInterval(refreshTimerInterval);
+    updateRefreshTimer();
+    refreshTimerInterval = setInterval(updateRefreshTimer, 1000);
+  }
+
+  function updateRefreshTimer() {
+    if (!lastRefreshTime) return;
+    var elapsed = Math.floor((Date.now() - lastRefreshTime) / 1000);
+    var min = Math.floor(elapsed / 60);
+    var sec = elapsed % 60;
+    var text = min > 0 ? min + 'm ' + sec + 's ago' : sec + 's ago';
+    document.getElementById('refresh-timer').textContent = text;
   }
 
   function loadData() {
@@ -569,7 +708,9 @@
         allSummary = result.summary;
         renderDateTabs();
         applyFilters();
-        showMsg('Last refreshed: ' + new Date().toLocaleTimeString());
+        renderTimeline();
+        showMsg('Data loaded');
+        startRefreshTimer();
       })
       .withFailureHandler(function(err) {
         showMsg('Error: ' + err.message);
@@ -588,7 +729,9 @@
         allSummary = result.summary;
         renderDateTabs();
         applyFilters();
-        showMsg('Refreshed: ' + new Date().toLocaleTimeString());
+        renderTimeline();
+        showMsg('Data refreshed');
+        startRefreshTimer();
         btn.disabled = false;
       })
       .withFailureHandler(function(err) {
@@ -658,6 +801,7 @@
     currentDate = date;
     renderDateTabs();
     applyFilters();
+    renderTimeline();
   }
 
   function filterSignupsByDate(signups) {
@@ -727,6 +871,151 @@
     // Then apply grade filter for the table
     var tableData = filterSignupsByGrade(dateFiltered);
     renderTable(tableData);
+  }
+
+  // ── Timeline Sidebar ─────────────────────────────────────────
+
+  function getESTNow() {
+    // Get current time in EST/EDT
+    var now = new Date();
+    var estStr = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
+    return new Date(estStr);
+  }
+
+  function startTimelineClock() {
+    updateTimelineClock();
+    timelineInterval = setInterval(function() {
+      updateTimelineClock();
+      updateTimelineNow();
+    }, 1000);
+  }
+
+  function updateTimelineClock() {
+    var est = getESTNow();
+    var h = est.getHours();
+    var m = est.getMinutes();
+    var s = est.getSeconds();
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    var h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+    var timeStr = h12 + ':' + pad2(m) + ':' + pad2(s) + ' ' + ampm;
+    document.getElementById('timeline-clock').textContent = timeStr;
+  }
+
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function extractTimeSlots(signups) {
+    // Get unique time slots from the signups for the selected date
+    var filtered = filterSignupsByDate(signups);
+    var slotMap = {};
+    for (var i = 0; i < filtered.length; i++) {
+      var s = filtered[i];
+      if (!s.start_datetime || !s.end_datetime) continue;
+      var key = s.start_datetime + '|' + s.end_datetime;
+      if (!slotMap[key]) {
+        slotMap[key] = { start: s.start_datetime, end: s.end_datetime };
+      }
+    }
+    var slots = [];
+    for (var k in slotMap) slots.push(slotMap[k]);
+    slots.sort(function(a, b) {
+      return parseDateToMs(a.start) - parseDateToMs(b.start);
+    });
+    return slots;
+  }
+
+  function parseDateToMs(dtStr) {
+    if (!dtStr) return 0;
+    var match = dtStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/);
+    if (!match) return 0;
+    return new Date(
+      parseInt(match[3]), parseInt(match[1]) - 1, parseInt(match[2]),
+      parseInt(match[4]), parseInt(match[5])
+    ).getTime();
+  }
+
+  function renderTimeline() {
+    var slots = extractTimeSlots(allSignups);
+    var container = document.getElementById('timeline-slots');
+
+    if (slots.length === 0) {
+      container.innerHTML = '<div style="text-align:center;color:var(--text-light);font-size:0.65rem;padding:1rem 0.25rem">No slots</div>';
+      return;
+    }
+
+    var est = getESTNow();
+    var nowMs = est.getTime();
+
+    var html = '';
+    for (var i = 0; i < slots.length; i++) {
+      var slot = slots[i];
+      var startMs = parseDateToMs(slot.start);
+      var endMs = parseDateToMs(slot.end);
+
+      var cls = 'timeline-slot';
+      if (nowMs >= startMs && nowMs < endMs) cls += ' tl-active';
+      else if (nowMs >= endMs) cls += ' tl-past';
+      else cls += ' tl-future';
+
+      var startLabel = formatTimeShort(slot.start);
+      html += '<div class="' + cls + '" data-start="' + startMs + '" data-end="' + endMs + '">' +
+        startLabel + '</div>';
+    }
+
+    container.innerHTML = html;
+    updateTimelineNow();
+  }
+
+  function updateTimelineNow() {
+    // Remove old now-line
+    var old = document.querySelector('.timeline-now-line');
+    if (old) old.parentNode.removeChild(old);
+
+    var container = document.getElementById('timeline-slots');
+    var slotEls = container.querySelectorAll('.timeline-slot');
+    if (slotEls.length === 0) return;
+
+    var est = getESTNow();
+    var nowMs = est.getTime();
+
+    // Find the overall range of the timeline
+    var firstStart = parseInt(slotEls[0].getAttribute('data-start'));
+    var lastEnd = parseInt(slotEls[slotEls.length - 1].getAttribute('data-end'));
+
+    if (nowMs < firstStart || nowMs > lastEnd) return;
+
+    // Calculate vertical position as percentage of container height
+    var totalRange = lastEnd - firstStart;
+    if (totalRange <= 0) return;
+    var pct = (nowMs - firstStart) / totalRange;
+    var containerHeight = container.scrollHeight;
+    var topPx = Math.round(pct * containerHeight);
+
+    var line = document.createElement('div');
+    line.className = 'timeline-now-line';
+    line.style.top = topPx + 'px';
+    container.appendChild(line);
+
+    // Update active states on slots
+    for (var i = 0; i < slotEls.length; i++) {
+      var el = slotEls[i];
+      var s = parseInt(el.getAttribute('data-start'));
+      var e = parseInt(el.getAttribute('data-end'));
+      el.className = 'timeline-slot' +
+        (nowMs >= s && nowMs < e ? ' tl-active' : nowMs >= e ? ' tl-past' : ' tl-future');
+    }
+  }
+
+  function formatTimeShort(dtStr) {
+    if (!dtStr) return '';
+    var parts = dtStr.split(' ');
+    if (parts.length < 2) return dtStr;
+    var timeParts = parts[1].split(':');
+    var h = parseInt(timeParts[0], 10);
+    var m = timeParts[1] || '00';
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    if (h > 12) h -= 12;
+    if (h === 0) h = 12;
+    return h + ':' + m + (ampm === 'AM' ? 'a' : 'p');
   }
 
   // ── CSV Upload ───────────────────────────────────────────────
