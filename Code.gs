@@ -125,6 +125,21 @@ function normDate(val) {
 }
 
 /**
+ * Convert a normDate string "M/D/YYYY H:MM" to a sortable numeric value.
+ */
+function dateSortKey(dtStr) {
+  if (!dtStr) return 0;
+  var match = dtStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/);
+  if (!match) return 0;
+  // YYYYMMDDHHM as a number for reliable sorting
+  return parseInt(match[3]) * 100000000 +
+         parseInt(match[1]) * 1000000 +
+         parseInt(match[2]) * 10000 +
+         parseInt(match[4]) * 100 +
+         parseInt(match[5]);
+}
+
+/**
  * Get all sign-up data merged with status tracking.
  */
 function getSignups(gradeFilter) {
@@ -188,8 +203,9 @@ function getSignups(gradeFilter) {
   }
 
   signups.sort(function(a, b) {
-    if (a.start_datetime < b.start_datetime) return -1;
-    if (a.start_datetime > b.start_datetime) return 1;
+    var startA = dateSortKey(a.start_datetime);
+    var startB = dateSortKey(b.start_datetime);
+    if (startA !== startB) return startA - startB;
     if (a.item < b.item) return -1;
     if (a.item > b.item) return 1;
     if (a.is_empty_slot !== b.is_empty_slot) return a.is_empty_slot ? 1 : -1;
